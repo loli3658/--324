@@ -1,0 +1,3179 @@
+//CreateTest.vue
+<template>
+  <v-container>
+    <v-form>
+      <!-- Header with Import Button and Help Icon -->
+      <div class="d-flex align-center mb-4">
+        <v-btn color="secondary" @click="triggerFileUpload">
+          Импортировать тест
+        </v-btn>
+        <v-tooltip bottom>
+          <template v-slot:activator="{ on, attrs }">
+            <v-icon
+              class="ml-2"
+              v-bind="attrs"
+              v-on="on"
+              @click="downloadSyntax"
+              style="cursor: pointer;"
+            >
+              mdi-help-circle
+            </v-icon>
+          </template>
+          <span>Скачать пример синтаксиса</span>
+        </v-tooltip>
+        <input
+          type="file"
+          ref="fileInput"
+          accept=".txt"
+          @change="handleFileUpload"
+          style="display: none;"
+        />
+      </div>
+
+      <!-- Existing Form Fields -->
+      <v-text-field label="Название теста" v-model="test.title" required></v-text-field>
+      <v-textarea label="Описание теста" v-model="test.description"></v-textarea>
+      <v-text-field
+        label="Пароль для теста (необязательно)"
+        v-model="test.password"
+        type="password"
+      ></v-text-field>
+      <v-checkbox
+        v-model="test.publick"
+        label="Публичный тест"
+        hide-details
+        dense
+      ></v-checkbox>
+      <v-text-field
+        label="Количество попыток прохождения (необязательно)"
+        v-model="test.maxAttempts"
+        type="number"
+        min="1"
+        step="1"
+      ></v-text-field>
+
+      <v-divider class="my-5"></v-divider>
+      <h3>Добавление вопросов</h3>
+
+      <div v-for="(q, index) in questions" :key="index" class="question-block">
+        <h4>Вопрос {{ index + 1 }}</h4>
+        <v-textarea label="Текст вопроса" v-model="q.text" required></v-textarea>
+        <v-select
+          v-model="q.type"
+          :items="questionTypeLabels"
+          label="Тип вопроса"
+          required
+        ></v-select>
+
+        <!-- Поле и кнопка для свободного ответа -->
+        <v-text-field
+          v-if="q.type === 'Свободный ответ'"
+          label="Правильный ответ для свободного текста"
+          v-model="q.correctAnswer"
+        ></v-text-field>
+        <v-btn
+          v-if="q.type === 'Свободный ответ'"
+          color="primary"
+          @click="saveFreeTextAnswer(index)"
+        >
+          Сохранить правильный ответ
+        </v-btn>
+
+        <!-- Поле для вариантов ответа и кнопка добавления для остальных типов вопросов -->
+        <v-text-field
+          v-if="q.type !== 'Свободный ответ'"
+          label="Вариант ответа"
+          v-model="q.newOption"
+          @keyup.enter="addOption(index)"
+        ></v-text-field>
+        <v-btn class="ml-5" v-if="q.type !== 'Свободный ответ'" @click="addOption(index)">
+          Добавить вариант
+        </v-btn>
+
+        <v-list v-if="q.options.length > 0">
+          <v-radio-group v-if="q.type === 'Выбор ответа'" v-model="q.correctAnswerIndex" column>
+            <v-list-item v-for="(option, optIndex) in q.options" :key="optIndex">
+              <v-list-item-content>
+                <v-radio :label="'Правильный ответ'" :value="optIndex" />
+                {{ option.text }}
+              </v-list-item-content>
+              <v-list-item-action>
+                <v-btn icon @click="removeOption(index, optIndex)">
+                  <v-icon>mdi-delete</v-icon>
+                </v-btn>
+              </v-list-item-action>
+            </v-list-item>
+          </v-radio-group>
+
+          <v-list-item v-for="(option, optIndex) in q.options" :key="optIndex" v-else>
+            <v-list-item-content>
+              <v-checkbox
+                v-if="q.type === 'Множественный выбор'"
+                v-model="q.options[optIndex].isCorrect"
+                label="Правильный ответ"
+              ></v-checkbox>
+              {{ option.text }}
+            </v-list-item-content>
+            <v-list-item-action>
+              <v-btn icon @click="removeOption(index, optIndex)">
+                <v-icon>mdi-delete</v-icon>
+              </v-btn>
+            </v-list-item-action>
+          </v-list-item>
+        </v-list>
+
+        <v-btn class="ml-5" color="error" small @click="removeQuestion(index)">Удалить вопрос</v-btn>
+      </div>
+
+      <v-btn class="ml-5" color="primary" @click="addQuestion">Добавить вопрос</v-btn>
+      <v-btn
+        :color="testCreated ? 'green' : 'primary'"
+        :disabled="questions.length === 0 || loading"
+        @click="createTest"
+        class="mt-3 ml-5"
+      >
+        {{ loading ? 'Создание теста...' : testCreated ? 'Тест создан' : 'Создать тест' }}
+      </v-btn>
+      <span v-if="loading" class="ml-2">Тест создается, скоро вы будете перенаправлены на главную страницу...</span>
+
+      <v-alert v-if="importError" type="error" class="mt-4">
+        {{ importError }}
+      </v-alert>
+      <v-alert v-if="importSuccess" type="success" class="mt-4">
+        Тест успешно импортирован!
+      </v-alert>
+    </v-form>
+  </v-container>
+</template>
+
+<script>
+import { supabase } from '../supabase';
+
+export default {
+  name: 'CreateTest',
+  data() {
+    return {
+      test: {
+        title: '',
+        description: '',
+        password: '',
+        publick: true,
+        maxAttempts: null,
+      },
+      testCreated: false,
+      createdTestId: null,
+      questionTypeLabels: ['Выбор ответа', 'Множественный выбор', 'Свободный ответ'],
+      questions: [],
+      loading: false,
+      importText: '',
+      importError: '',
+      importSuccess: false,
+    };
+  },
+  methods: {
+    // Trigger the hidden file input
+    triggerFileUpload() {
+      this.$refs.fileInput.click();
+    },
+
+    // Download the syntax example
+    downloadSyntax() {
+      const syntax = `Название теста: Пример теста
+Описание: Это пример теста
+Публичный: true
+Пароль: testpassword
+Максимальные попытки: 3
+
+Q: Вопрос 1
+Тип вопроса: Выбор ответа
+- Ответ 1
+- Ответ 2
+* Ответ 2
+
+Q: Вопрос 2
+Тип вопроса: Свободный ответ
+CorrectAnswer: Правильный ответ
+
+Q: Вопрос 3
+Тип вопроса: Множественный выбор
+- Ответ 1
+* Ответ 2
+* Ответ 3
+- Ответ 4`;
+
+      const blob = new Blob([syntax], { type: 'text/plain;charset=utf-8' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = 'test_syntax_example.txt';
+      link.click();
+      URL.revokeObjectURL(link.href);
+    },
+
+    // Handle file upload
+    handleFileUpload(event) {
+      const file = event.target.files[0];
+      if (file && file.type === 'text/plain') {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          this.importText = e.target.result;
+          this.importTestFromText();
+        };
+        reader.readAsText(file);
+      } else {
+        this.importError = 'Пожалуйста, загрузите текстовый файл с расширением .txt';
+      }
+      // Reset the file input
+      event.target.value = '';
+    },
+
+    /**
+     * Импорт теста из текстового синтаксиса
+     */
+    importTestFromText() {
+      this.importError = '';
+      this.importSuccess = false;
+      const lines = this.importText
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line !== '');
+      let currentQuestion = null;
+
+      // Reset test and questions
+      this.test = {
+        title: '',
+        description: '',
+        password: '',
+        publick: true,
+        maxAttempts: null,
+      };
+      this.questions = [];
+
+      try {
+        let i = 0;
+        while (i < lines.length) {
+          const line = lines[i];
+
+          // Парсинг основных полей теста
+          if (line.startsWith('Название теста:')) {
+            this.test.title = line.replace('Название теста:', '').trim();
+            i++;
+          } else if (line.startsWith('Описание:')) {
+            this.test.description = line.replace('Описание:', '').trim();
+            i++;
+          } else if (line.startsWith('Публичный:')) {
+            const value = line.replace('Публичный:', '').trim().toLowerCase();
+            this.test.publick = value === 'true';
+            i++;
+          } else if (line.startsWith('Пароль:')) {
+            this.test.password = line.replace('Пароль:', '').trim();
+            i++;
+          } else if (line.startsWith('Максимальные попытки:')) {
+            const attempts = parseInt(line.replace('Максимальные попытки:', '').trim());
+            if (!isNaN(attempts) && attempts > 0) {
+              this.test.maxAttempts = attempts;
+            }
+            i++;
+          }
+          // Парсинг вопросов
+          else if (line.startsWith('Q:')) {
+            currentQuestion = {
+              type: 'Выбор ответа',
+              text: line.replace('Q:', '').trim(),
+              options: [],
+              correctAnswerIndex: null,
+              correctAnswer: '',
+              newOption: '',
+            };
+            this.questions.push(currentQuestion);
+            i++;
+            // Ожидание типа вопроса
+            if (i >= lines.length) throw new Error('Тип вопроса не указан для вопроса: ' + currentQuestion.text);
+            const typeLine = lines[i];
+            if (typeLine.startsWith('Тип вопроса:')) {
+              const type = typeLine.replace('Тип вопроса:', '').trim();
+              if (!this.questionTypeLabels.includes(type)) {
+                throw new Error('Неизвестный тип вопроса: ' + type);
+              }
+              currentQuestion.type = type;
+              i++;
+            } else {
+              throw new Error('Тип вопроса не указан для вопроса: ' + currentQuestion.text);
+            }
+
+            // Парсинг вариантов ответов или правильного ответа
+            while (i < lines.length && !lines[i].startsWith('Q:')) {
+              const optionLine = lines[i];
+              if (currentQuestion.type === 'Свободный ответ') {
+                if (optionLine.startsWith('CorrectAnswer:')) {
+                  currentQuestion.correctAnswer = optionLine.replace('CorrectAnswer:', '').trim();
+                } else {
+                  throw new Error('Некорректный синтаксис для свободного ответа: ' + optionLine);
+                }
+                i++;
+              } else {
+                // Обработка вариантов ответов
+                let isCorrect = false;
+                if (optionLine.startsWith('*')) {
+                  isCorrect = true;
+                  currentQuestion.options.push({ text: optionLine.replace('*', '').trim(), isCorrect });
+                  if (currentQuestion.type === 'Выбор ответа') {
+                    currentQuestion.correctAnswerIndex = currentQuestion.options.length - 1;
+                  }
+                } else if (optionLine.startsWith('-')) {
+                  currentQuestion.options.push({ text: optionLine.replace('-', '').trim(), isCorrect: false });
+                } else {
+                  throw new Error('Некорректный синтаксис варианта ответа: ' + optionLine);
+                }
+                i++;
+              }
+            }
+          } else {
+            // Пропустить неизвестные строки
+            i++;
+          }
+        }
+
+        // Валидация обязательных полей
+        if (!this.test.title) {
+          throw new Error('Название теста обязательно.');
+        }
+        if (this.questions.length === 0) {
+          throw new Error('Необходимо добавить хотя бы один вопрос.');
+        }
+
+        // Дополнительная валидация вопросов
+        this.questions.forEach((q, idx) => {
+          if (!q.text) {
+            throw new Error(`Текст вопроса обязателен для вопроса ${idx + 1}.`);
+          }
+          if (q.type !== 'Свободный ответ' && q.options.length < 2) {
+            throw new Error(`Для вопроса "${q.text}" необходимо минимум 2 варианта ответа.`);
+          }
+          if (q.type === 'Выбор ответа' && (q.correctAnswerIndex === null || q.correctAnswerIndex === undefined)) {
+            throw new Error(`Необходимо указать правильный ответ для вопроса "${q.text}".`);
+          }
+          if (q.type === 'Множественный выбор') {
+            const correctOptions = q.options.filter(opt => opt.isCorrect);
+            if (correctOptions.length === 0) {
+              throw new Error(`Необходимо указать хотя бы один правильный ответ для вопроса "${q.text}".`);
+            }
+          }
+        });
+
+        this.importSuccess = true;
+      } catch (error) {
+        this.importError = error.message;
+      }
+    },
+
+    saveFreeTextAnswer(index) {
+      const question = this.questions[index];
+      if (question.type === 'Свободный ответ') {
+        question.options = [{ text: question.correctAnswer, isCorrect: true }];
+      }
+    },
+    async createTest() {
+      if (this.questions.length === 0) {
+        console.error('Тест не может быть создан без вопросов');
+        return;
+      }
+
+      this.loading = true;
+
+      const { data: { user }, error: userError } = await supabase.auth.getUser();
+      if (userError || !user) {
+        console.error('Ошибка при получении данных о пользователе:', userError?.message || 'Пользователь не авторизован');
+        this.loading = false;
+        return;
+      }
+
+      if (!this.test.title.trim()) {
+        console.error('Название теста не может быть пустым');
+        this.loading = false;
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from('tests')
+        .insert([
+          {
+            user_id: user.id,
+            title: this.test.title,
+            description: this.test.description,
+            password: this.test.password || null,
+            publick: this.test.publick,
+            created_at: new Date(),
+          },
+        ])
+        .select();
+
+      if (error) {
+        console.error('Ошибка при создании теста:', error);
+        this.loading = false;
+        return;
+      }
+
+      if (data && data.length > 0) {
+        this.testCreated = true;
+        this.createdTestId = data[0].id;
+
+        // Сохранение ограничения на количество попыток
+        if (this.test.maxAttempts !== null) {
+          await this.saveTestLimit(this.createdTestId, this.test.maxAttempts);
+        }
+
+        await this.saveQuestions();
+
+        setTimeout(() => {
+          this.$router.push('/home');
+        }, 2000);
+      } else {
+        console.error('Созданный тест не возвращает id');
+      }
+
+      this.loading = false;
+    },
+    async saveTestLimit(testId, maxAttempts) {
+      const { error } = await supabase
+        .from('test_limits')
+        .insert([
+          {
+            test_id: testId,
+            max_attempts: maxAttempts,
+          },
+        ]);
+      if (error) {
+        console.error('Ошибка при сохранении ограничения на количество попыток:', error);
+      }
+    },
+    async saveQuestions() {
+      for (let question of this.questions) {
+        const questionType = this.getQuestionTypeValue(question.type);
+        const { data, error } = await supabase
+          .from('questions')
+          .insert([
+            {
+              test_id: this.createdTestId,
+              question_text: question.text,
+              question_type: questionType,
+              order_number: this.questions.indexOf(question) + 1,
+            },
+          ])
+          .select();
+
+        if (error) {
+          console.error('Ошибка при добавлении вопроса:', error);
+          continue;
+        }
+
+        const questionId = data[0].id;
+        if (questionType === 'free_text') {
+          await this.saveFreeTextOption(questionId, question.correctAnswer);
+        } else {
+          await this.saveOptions(questionId, question);
+        }
+      }
+    },
+    async saveFreeTextOption(questionId, correctAnswer) {
+      if (correctAnswer) {
+        const { error } = await supabase
+          .from('options')
+          .insert([
+            {
+              question_id: questionId,
+              option_text: correctAnswer,
+              is_correct: true,
+            },
+          ]);
+        if (error) console.error('Ошибка при добавлении свободного ответа:', error);
+      }
+    },
+    async saveOptions(questionId, question) {
+      for (const [index, option] of question.options.entries()) {
+        const isCorrect = question.type === 'Выбор ответа'
+          ? question.correctAnswerIndex === index
+          : option.isCorrect;
+
+        const { error: optionError } = await supabase
+          .from('options')
+          .insert([
+            {
+              question_id: questionId,
+              option_text: option.text,
+              is_correct: isCorrect,
+            },
+          ]);
+
+        if (optionError) {
+          console.error('Ошибка при добавлении варианта ответа:', optionError);
+        }
+      }
+    },
+    getQuestionTypeValue(label) {
+      if (label === 'Выбор ответа') return 'single_choice';
+      if (label === 'Множественный выбор') return 'multiple_choice';
+      if (label === 'Свободный ответ') return 'free_text';
+    },
+    addQuestion() {
+      this.questions.push({
+        type: 'Выбор ответа',
+        text: '',
+        options: [],
+        correctAnswerIndex: null,
+        correctAnswer: '',
+        newOption: '',
+      });
+    },
+    removeQuestion(index) {
+      this.questions.splice(index, 1);
+    },
+    addOption(questionIndex) {
+      const question = this.questions[questionIndex];
+      if (question.newOption.trim()) {
+        question.options.push({ text: question.newOption, isCorrect: false });
+        question.newOption = '';
+      }
+    },
+    removeOption(questionIndex, optionIndex) {
+      const question = this.questions[questionIndex];
+      question.options.splice(optionIndex, 1);
+      if (question.correctAnswerIndex === optionIndex) {
+        question.correctAnswerIndex = null;
+      }
+    },
+  },
+};
+</script>
+
+<style>
+.question-block {
+  margin-bottom: 20px;
+}
+.v-btn {
+  margin-top: 10px;
+}
+/* Дополнительные стили при необходимости */
+</style>
+
+
+//EditTest
+<template>
+  <v-container>
+    <h2>Редактирование теста: {{ test.title }}</h2>
+    <v-form>
+      <!-- Название теста -->
+      <v-text-field label="Название теста" v-model="test.title" required></v-text-field>
+      
+      <!-- Описание теста -->
+      <v-textarea label="Описание теста" v-model="test.description"></v-textarea>
+
+      <!-- Лимит попыток -->
+      <v-text-field
+        label="Количество попыток прохождения (оставьте пустым для неограниченного)"
+        v-model="test.maxAttempts"
+        type="number"
+        min="1"
+        step="1"
+        :placeholder="originalMaxAttempts !== null ? `Изначально: ${originalMaxAttempts}` : 'Изначально: неограниченно'"
+      ></v-text-field>
+
+      <v-divider class="my-5"></v-divider>
+      <h3>Редактирование вопросов</h3>
+
+      <!-- Вопросы -->
+      <div v-for="(question, qIndex) in test.questions" :key="qIndex" class="question-block">
+        <h4>Вопрос {{ qIndex + 1 }}</h4>
+        
+        <!-- Текст вопроса -->
+        <v-textarea label="Текст вопроса" v-model="question.question_text" required></v-textarea>
+
+        <!-- Тип вопроса -->
+        <v-select
+          v-model="question.question_type"
+          :items="questionTypeOptions"
+          label="Тип вопроса"
+          required
+        ></v-select>
+
+        <!-- Добавление нового варианта ответа -->
+        <v-row v-if="question.question_type !== 'free_text'" class="mt-3">
+          <v-col cols="10">
+            <v-text-field
+              label="Новый вариант ответа"
+              v-model="question.newOptionText"
+              @keyup.enter="addOption(qIndex)"
+            ></v-text-field>
+          </v-col>
+          <v-col cols="2">
+            <v-btn color="primary" @click="addOption(qIndex)">Добавить</v-btn>
+          </v-col>
+        </v-row>
+
+        <!-- Отображение вариантов ответа -->
+        <v-list dense>
+          <v-list-item
+            v-for="(option, oIndex) in question.options"
+            :key="oIndex"
+          >
+            <v-row class="w-100" align="center">
+              <!-- Чекбокс или радиокнопка -->
+              <v-col cols="1">
+                <template v-if="question.question_type === 'multiple_choice'">
+                  <v-checkbox
+                    v-model="option.is_correct"
+                    :label="''"
+                  ></v-checkbox>
+                </template>
+                <template v-else-if="question.question_type === 'single_choice'">
+                  <v-radio
+                    :value="true"
+                    v-model="option.is_correct"
+                    @change="setSingleChoiceCorrect(qIndex, oIndex)"
+                    :label="''"
+                  ></v-radio>
+                </template>
+              </v-col>
+              
+              <!-- Текстовое поле для варианта ответа -->
+              <v-col cols="10">
+                <v-text-field
+                  v-model="option.option_text"
+                  label="Вариант ответа"
+                  dense
+                ></v-text-field>
+              </v-col>
+              
+              <!-- Кнопка удаления варианта ответа -->
+              <v-col cols="1" class="text-center">
+                <v-btn icon @click="removeOption(qIndex, oIndex)">
+                  <v-icon color="red">mdi-delete</v-icon>
+                </v-btn>
+              </v-col>
+            </v-row>
+          </v-list-item>
+        </v-list>
+
+        <!-- Кнопка удаления вопроса -->
+        <v-btn color="error" small @click="removeQuestion(qIndex)">Удалить вопрос</v-btn>
+        <v-divider class="my-5"></v-divider>
+      </div>
+
+      <!-- Кнопка добавления нового вопроса -->
+      <v-btn color="primary" @click="addQuestion">Добавить вопрос</v-btn>
+      
+      <!-- Кнопка сохранения изменений -->
+      <v-btn color="success" @click="saveChanges" class="mt-3">Сохранить изменения</v-btn>
+    </v-form>
+  </v-container>
+</template>
+
+<script>
+import { supabase } from '../supabase';
+
+export default {
+  name: 'EditTest',
+  data() {
+    return {
+      testId: null,
+      test: {
+        title: '',
+        description: '',
+        maxAttempts: null, // Поле для лимита попыток
+        questions: [],
+      },
+      originalMaxAttempts: null, // Для отображения исходного лимита попыток
+      questionTypeOptions: ['single_choice', 'multiple_choice', 'free_text'],
+    };
+  },
+  async created() {
+    this.testId = this.$route.params.testId;
+    await this.fetchTest();
+    await this.fetchMaxAttempts(); // Загружаем лимит попыток из таблицы test_limits
+  },
+  methods: {
+    // Загрузка теста из базы данных
+    async fetchTest() {
+      const { data: testData, error: testError } = await supabase
+        .from('tests')
+        .select(`
+          id,
+          title,
+          description,
+          questions (
+            id,
+            question_text,
+            question_type,
+            options (
+              id,
+              option_text,
+              is_correct
+            )
+          )
+        `)
+        .eq('id', this.testId)
+        .single();
+
+      if (testError) {
+        console.error('Ошибка при загрузке теста:', testError.message);
+        return;
+      }
+
+      this.test = {
+        ...testData,
+        questions: testData.questions.map(q => ({
+          ...q,
+          newOptionText: '',
+        })),
+      };
+    },
+
+    // Загрузка лимита попыток
+    async fetchMaxAttempts() {
+      const { data: limitData, error: limitError } = await supabase
+        .from('test_limits')
+        .select('max_attempts')
+        .eq('test_id', this.testId)
+        .single();
+
+      if (limitError) {
+        if (limitError.code !== 'PGRST116') { // PGRST116: Row not found
+          console.error('Ошибка при загрузке лимита попыток:', limitError.message);
+        }
+        // Если запись не найдена, оставляем originalMaxAttempts как null
+        return;
+      }
+
+      this.originalMaxAttempts = limitData ? limitData.max_attempts : null;
+      this.test.maxAttempts = this.originalMaxAttempts; // Устанавливаем текущий лимит попыток
+    },
+
+    // Добавление нового вопроса
+    addQuestion() {
+      this.test.questions.push({
+        id: null,
+        question_text: '',
+        question_type: 'single_choice',
+        options: [],
+        newOptionText: '',
+      });
+    },
+
+    // Удаление вопроса
+    async removeQuestion(qIndex) {
+      const question = this.test.questions[qIndex];
+      if (question.id) {
+        const { error } = await supabase.from('questions').delete().eq('id', question.id);
+        if (error) {
+          console.error('Ошибка при удалении вопроса:', error.message);
+          return;
+        }
+      }
+      this.test.questions.splice(qIndex, 1);
+    },
+
+    // Добавление варианта ответа
+    addOption(qIndex) {
+      const question = this.test.questions[qIndex];
+      if (question.newOptionText.trim()) {
+        const newOption = {
+          id: null,
+          option_text: question.newOptionText,
+          is_correct: false, // По умолчанию неверный
+        };
+        if (question.question_type === 'single_choice') {
+          // Для single_choice корректный ответ будет установлен через радио-кнопку
+          newOption.is_correct = false;
+        }
+        question.options.push(newOption);
+        question.newOptionText = '';
+      }
+    },
+
+    // Удаление варианта ответа
+    async removeOption(qIndex, oIndex) {
+      const option = this.test.questions[qIndex].options[oIndex];
+      const question = this.test.questions[qIndex];
+      if (option.id) {
+        const { error } = await supabase.from('options').delete().eq('id', option.id);
+        if (error) {
+          console.error('Ошибка при удалении варианта ответа:', error.message);
+          return;
+        }
+      }
+
+      // Если удаляемый вариант был правильным для single_choice, сбрасываем все is_correct
+      if (question.question_type === 'single_choice' && option.is_correct) {
+        question.options.forEach(opt => {
+          opt.is_correct = false;
+        });
+      }
+
+      question.options.splice(oIndex, 1);
+    },
+
+    // Установка единственного правильного варианта для single_choice
+    setSingleChoiceCorrect(qIndex, oIndex) {
+      const question = this.test.questions[qIndex];
+      question.options.forEach((opt, index) => {
+        opt.is_correct = index === oIndex;
+      });
+    },
+
+    // Сохранение изменений
+    async saveChanges() {
+      try {
+        // Обновляем название и описание теста
+        const { error: testUpdateError } = await supabase
+          .from('tests')
+          .update({
+            title: this.test.title,
+            description: this.test.description,
+          })
+          .eq('id', this.testId);
+
+        if (testUpdateError) {
+          throw testUpdateError;
+        }
+
+        // Обновляем лимит попыток
+        if (this.test.maxAttempts !== this.originalMaxAttempts) {
+          if (this.test.maxAttempts === null) {
+            // Удаляем запись из test_limits, если лимит больше не нужен
+            const { error: deleteLimitError } = await supabase.from('test_limits').delete().eq('test_id', this.testId);
+            if (deleteLimitError) {
+              throw deleteLimitError;
+            }
+          } else {
+            // Обновляем или вставляем лимит попыток
+            const { data: existingLimit, error: limitError } = await supabase
+              .from('test_limits')
+              .select('id')
+              .eq('test_id', this.testId)
+              .single();
+
+            if (limitError) {
+              if (limitError.code === 'PGRST116') { // Запись не найдена, добавляем
+                const { error: insertLimitError } = await supabase
+                  .from('test_limits')
+                  .insert({ test_id: this.testId, max_attempts: this.test.maxAttempts });
+                if (insertLimitError) {
+                  throw insertLimitError;
+                }
+              } else {
+                throw limitError;
+              }
+            } else {
+              // Обновляем существующий лимит
+              const { error: updateLimitError } = await supabase
+                .from('test_limits')
+                .update({ max_attempts: this.test.maxAttempts })
+                .eq('id', existingLimit.id);
+              if (updateLimitError) {
+                throw updateLimitError;
+              }
+            }
+          }
+        }
+
+        // Обновляем вопросы и варианты ответов
+        let orderNumber = 1;
+
+        for (const question of this.test.questions) {
+          let questionId = question.id;
+
+          if (question.id) {
+            // Обновляем существующий вопрос
+            const { error: questionUpdateError } = await supabase
+              .from('questions')
+              .update({
+                question_text: question.question_text,
+                question_type: question.question_type,
+                order_number: orderNumber++,
+              })
+              .eq('id', question.id);
+
+            if (questionUpdateError) {
+              console.error('Ошибка при обновлении вопроса:', questionUpdateError.message);
+              continue;
+            }
+          } else {
+            // Добавляем новый вопрос
+            const { data: newQuestion, error: questionInsertError } = await supabase
+              .from('questions')
+              .insert({
+                test_id: this.testId,
+                question_text: question.question_text,
+                question_type: question.question_type,
+                order_number: orderNumber++,
+              })
+              .select()
+              .single();
+
+            if (questionInsertError) {
+              console.error('Ошибка при добавлении нового вопроса:', questionInsertError.message);
+              continue;
+            }
+
+            questionId = newQuestion.id;
+          }
+
+          // Обновляем варианты ответов
+          for (const option of question.options) {
+            if (option.id) {
+              // Обновляем существующий вариант ответа
+              const { error: optionUpdateError } = await supabase
+                .from('options')
+                .update({
+                  option_text: option.option_text,
+                  is_correct: option.is_correct,
+                })
+                .eq('id', option.id);
+
+              if (optionUpdateError) {
+                console.error('Ошибка при обновлении варианта ответа:', optionUpdateError.message);
+                continue;
+              }
+            } else {
+              // Добавляем новый вариант ответа
+              const { error: optionInsertError } = await supabase
+                .from('options')
+                .insert({
+                  question_id: questionId,
+                  option_text: option.option_text,
+                  is_correct: option.is_correct,
+                });
+
+              if (optionInsertError) {
+                console.error('Ошибка при добавлении нового варианта ответа:', optionInsertError.message);
+                continue;
+              }
+            }
+          }
+        }
+
+        alert('Изменения сохранены.');
+        this.$router.push('/my-tests');
+      } catch (error) {
+        console.error('Ошибка при сохранении изменений:', error);
+        alert('Не удалось сохранить изменения.');
+      }
+    },
+  },
+};
+</script>
+
+<style>
+.question-block {
+  margin-bottom: 20px;
+}
+
+/* Удаляем лишние отступы в v-list-item */
+.v-list-item {
+  padding: 8px 0;
+}
+
+/* Выравнивание элементов внутри v-row */
+.v-list-item .v-row {
+  display: flex;
+  align-items: center;
+}
+
+/* Расширение текстовых полей для вариантов ответов */
+.v-text-field {
+  width: 100%;
+}
+
+/* Центрирование кнопки удаления */
+.text-center {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+</style>
+
+
+//MyStatistics
+<template>
+  <v-container>
+    <v-row>
+      <v-col cols="12">
+        <v-card>
+          <v-card-title>Моя статистика</v-card-title>
+          <v-card-text>
+            <ul>
+              <li class="ml-5">Пройденных тестов: {{ statistics.testsTaken }}</li>
+              <li class="ml-5">Средний балл: {{ statistics.averageScore.toFixed(2) }}</li>
+            </ul>
+            <h3>Статистика по тестам:</h3>
+            <v-data-table
+              :headers="testStatsHeaders"
+              :items="testStatistics"
+              class="elevation-1"
+            >
+              <template #[`item.actions`]="{ item }">
+                <v-btn color="primary" @click="goToTestStatistics(item.testId)">
+                  Подробнее
+                </v-btn>
+              </template>
+            </v-data-table>
+          </v-card-text>
+        </v-card>
+      </v-col>
+    </v-row>
+  </v-container>
+</template>
+
+<script>
+import { supabase } from '../supabase';
+
+export default {
+  name: 'MyStatistics',
+  data() {
+    return {
+      statistics: {
+        testsTaken: 0,
+        averageScore: 0,
+      },
+      testStatistics: [],
+      testStatsHeaders: [
+        { text: 'Название теста', value: 'testTitle' },
+        { text: 'Попыток', value: 'attempts' },
+        { text: 'Средний балл', value: 'averageScore' },
+        { text: 'Действия', value: 'actions', sortable: false },
+      ],
+    };
+  },
+  async mounted() {
+    await this.fetchUserStatistics();
+  },
+  methods: {
+    async fetchUserStatistics() {
+      try {
+        const { data: { user }, error: userError } = await supabase.auth.getUser();
+
+        if (userError || !user) {
+          console.error('Ошибка при получении данных о пользователе:', userError?.message || 'Пользователь не авторизован');
+          return;
+        }
+
+        const userId = user.id;
+
+        // Получаем общую статистику пользователя из таблицы user_statistics
+        const { data: userStats, error: statsError } = await supabase
+          .from('user_statistics')
+          .select('tests_taken, average_score')
+          .eq('user_id', userId)
+          .single();
+
+        if (statsError) {
+          console.error('Ошибка при загрузке статистики:', statsError.message);
+        } else {
+          this.statistics.testsTaken = userStats?.tests_taken ?? 0;
+          this.statistics.averageScore = userStats?.average_score ?? 0;
+        }
+
+        // Получаем список попыток пользователя с названиями тестов
+        const { data: attempts, error: attemptsError } = await supabase
+          .from('test_attempts')
+          .select('id, test_id, score, tests(title)')
+          .eq('user_id', userId);
+
+        if (attemptsError) {
+          console.error('Ошибка при загрузке попыток тестов:', attemptsError.message);
+          return;
+        }
+
+        const testStatsMap = {};
+
+        for (const attempt of attempts) {
+          const testId = attempt.test_id;
+          const testTitle = attempt.tests.title;
+
+          if (!testStatsMap[testId]) {
+            testStatsMap[testId] = {
+              testId, // Добавляем testId для навигации
+              testTitle,
+              attempts: 0,
+              totalScore: 0,
+            };
+          }
+
+          testStatsMap[testId].attempts += 1;
+          testStatsMap[testId].totalScore += attempt.score;
+        }
+
+        // Преобразуем данные в массив и вычисляем средний балл для каждого теста
+        this.testStatistics = Object.values(testStatsMap).map(stat => {
+          const averageScore = stat.totalScore / stat.attempts;
+          return {
+            testId: stat.testId, // Добавляем testId для навигации
+            testTitle: stat.testTitle,
+            attempts: stat.attempts,
+            averageScore: averageScore.toFixed(2),
+          };
+        });
+
+      } catch (error) {
+        console.error('Ошибка при получении статистики:', error.message);
+      }
+    },
+    goToTestStatistics(testId) {
+      this.$router.push({ name: 'TestStatistics', params: { testId } });
+    },
+  },
+};
+</script>
+
+<style>
+.v-card {
+  max-width: 800px;
+  margin: auto;
+}
+</style>
+
+
+//MyTests
+<template>
+  <v-container>
+    <v-row>
+      <v-col cols="12" v-for="test in myTests" :key="test.id">
+        <v-card>
+          <v-card-title>{{ test.title }}</v-card-title>
+          <v-card-text>
+            Количество прохождений: {{ test.attemptCount }}
+          </v-card-text>
+          <v-card-actions>
+            <v-btn color="primary" @click="viewTestUsers(test.id)">
+              Посмотреть прохождения
+            </v-btn>
+          </v-card-actions>
+        </v-card>
+      </v-col>
+    </v-row>
+  </v-container>
+</template>
+
+<script>
+import { supabase } from '../supabase';
+
+export default {
+  name: 'MyTests',
+  data() {
+    return {
+      myTests: [],
+    };
+  },
+  async mounted() {
+    await this.fetchMyTests();
+  },
+  methods: {
+    async fetchMyTests() {
+      try {
+        const {
+          data: { user },
+          error: userError,
+        } = await supabase.auth.getUser();
+
+        if (userError || !user) {
+          console.error(
+            'Ошибка при получении данных о пользователе:',
+            userError?.message || 'Пользователь не авторизован'
+          );
+          return;
+        }
+
+        // Получаем список тестов пользователя с количеством попыток
+        const { data: testsData, error: testsError } = await supabase
+          .from('tests')
+          .select('id, title, test_attempts(id)')
+          .eq('user_id', user.id);
+
+        if (testsError) {
+          console.error('Ошибка при получении тестов:', testsError.message);
+          return;
+        }
+
+        // Преобразуем данные, чтобы включить количество попыток
+        this.myTests = testsData.map((test) => ({
+          id: test.id,
+          title: test.title,
+          attemptCount: test.test_attempts ? test.test_attempts.length : 0,
+        }));
+      } catch (error) {
+        console.error('Ошибка при загрузке тестов:', error.message);
+      }
+    },
+    viewTestUsers(testId) {
+      this.$router.push({ name: 'TestUsers', params: { testId } });
+    },
+  },
+};
+</script>
+
+
+
+//ProfileUsers
+<template>
+  <v-container>
+    <!-- Карточка профиля пользователя -->
+    <v-card class="mb-5">
+      <v-card-title>{{ user.username }}</v-card-title>
+      <v-card-subtitle>{{ user.email }}</v-card-subtitle>
+      <v-card-text>
+        <p>Дата создания профиля: {{ user.created_at }}</p>
+      </v-card-text>
+    </v-card>
+
+    <!-- Заголовок списка тестов -->
+    <h3>Тесты, созданные пользователем</h3>
+
+    <!-- Список тестов пользователя -->
+    <v-row>
+      <v-col cols="12" md="6" v-for="test in userTests" :key="test.id">
+        <v-card class="mb-4">
+          <v-card-title>{{ test.title }}</v-card-title>
+          <v-card-text>{{ test.description }}</v-card-text>
+          <v-card-actions>
+            <!-- Кнопка "Пройти тест", если лимит попыток не исчерпан -->
+            <template v-if="!hasReachedAttemptLimit(test)">
+              <v-btn color="primary" @click="goToTest(test)">
+                Пройти тест
+              </v-btn>
+            </template>
+            <!-- Показать замок, если лимит попыток достигнут -->
+            <template v-else>
+              <v-icon color="red">mdi-lock</v-icon>
+            </template>
+            <v-spacer></v-spacer>
+            <v-icon v-if="test.password">mdi-lock</v-icon>
+          </v-card-actions>
+        </v-card>
+      </v-col>
+    </v-row>
+  </v-container>
+</template>
+
+<script>
+import { supabase } from '../supabase';
+
+export default {
+  name: 'ProfileUsers',
+  data() {
+    return {
+      user: {}, // Данные пользователя
+      userTests: [], // Список тестов пользователя
+      userAttempts: {}, // Попытки пользователя по тестам
+      testLimits: {}, // Лимиты попыток для тестов
+    };
+  },
+  async created() {
+    const userId = this.$route.params.userId;
+    await this.fetchUserProfile(userId);
+    await this.fetchUserTests(userId);
+    await this.fetchUserAttempts(userId);
+    await this.fetchTestLimits();
+  },
+  methods: {
+    // Получаем данные профиля пользователя
+    async fetchUserProfile(userId) {
+      const { data: user, error: userError } = await supabase
+        .from('users')
+        .select('username, email, created_at')
+        .eq('id', userId)
+        .single();
+
+      if (userError) {
+        console.error('Ошибка при получении данных пользователя:', userError);
+      } else {
+        this.user = user;
+      }
+    },
+
+    // Получение тестов пользователя
+    async fetchUserTests(userId) {
+      const { data: tests, error: testsError } = await supabase
+        .from('tests')
+        .select('id, title, description, password')
+        .eq('user_id', userId);
+
+      if (testsError) {
+        console.error('Ошибка при получении тестов пользователя:', testsError);
+      } else {
+        this.userTests = tests;
+      }
+    },
+
+    // Получение статистики по попыткам пользователя
+    async fetchUserAttempts(userId) {
+      try {
+        const { data: attempts, error: attemptsError } = await supabase
+          .from('test_attempts')
+          .select('test_id')
+          .eq('user_id', userId);
+
+        if (attemptsError) {
+          console.error('Ошибка при загрузке попыток тестов:', attemptsError.message);
+          return;
+        }
+
+        const attemptsMap = attempts.reduce((map, attempt) => {
+          map[attempt.test_id] = (map[attempt.test_id] || 0) + 1;
+          return map;
+        }, {});
+
+        console.log('Попытки пользователя:', attemptsMap);
+        this.userAttempts = attemptsMap;
+      } catch (error) {
+        console.error('Ошибка при получении статистики:', error.message);
+      }
+    },
+
+    // Получение лимитов для тестов
+    async fetchTestLimits() {
+      try {
+        const { data: limits, error } = await supabase
+          .from('test_limits')
+          .select('test_id, max_attempts');
+
+        if (error) {
+          console.error('Ошибка при получении лимитов попыток:', error.message);
+          return;
+        }
+
+        const limitsMap = limits.reduce((map, limit) => {
+          map[limit.test_id] = limit.max_attempts;
+          return map;
+        }, {});
+
+        console.log('Лимиты попыток для тестов:', limitsMap);
+        this.testLimits = limitsMap;
+      } catch (error) {
+        console.error('Ошибка при получении лимитов:', error.message);
+      }
+    },
+
+    // Проверка, достиг ли пользователь лимита попыток
+    hasReachedAttemptLimit(test) {
+      const attempts = this.userAttempts[test.id] || 0;
+      const maxAttempts = this.testLimits[test.id];
+
+      if (maxAttempts === undefined) {
+        return false; // Если лимит не задан, то пропускаем
+      }
+
+      return attempts >= maxAttempts; // Проверка, достиг ли лимит
+    },
+
+    // Переход к тесту с проверкой пароля
+    async goToTest(test) {
+      if (test.password) {
+        const enteredPassword = prompt('Введите пароль для теста:');
+        if (enteredPassword === test.password) {
+          this.$router.push(`/tests/${test.id}`);
+        } else {
+          alert('Неверный пароль');
+        }
+      } else {
+        this.$router.push(`/tests/${test.id}`);
+      }
+    },
+  },
+};
+</script>
+
+<style scoped>
+.v-container {
+  padding: 16px;
+}
+.v-card {
+  min-height: 150px;
+}
+</style>
+
+
+
+//TakeTest
+<template>
+  <v-container>
+    <!-- Компонент NavBar должен быть вложен здесь, если он не глобальный -->
+    <h2>{{ test.title }}</h2>
+    <v-form v-if="!resultsDialog">
+      <div v-for="(question, index) in questions" :key="index" class="question-block">
+        <h3>{{ question.question_text }}</h3>
+
+        <!-- Вопрос со свободным ответом -->
+        <v-text-field
+          v-if="question.question_type === 'free_text'"
+          :label="`Ответ на вопрос: ${question.question_text}`"
+          v-model="userAnswers[question.id]"
+        ></v-text-field>
+
+        <!-- Вопрос с одним выбором -->
+        <v-radio-group
+          v-if="question.question_type === 'single_choice'"
+          v-model="userAnswers[question.id]"
+          :label="`Выберите один вариант: ${question.question_text}`"
+        >
+          <v-radio
+            v-for="option in question.options"
+            :key="option.id"
+            :label="option.option_text"
+            :value="option.id"
+          ></v-radio>
+        </v-radio-group>
+
+        <!-- Вопрос с множественным выбором -->
+        <div v-if="question.question_type === 'multiple_choice'">
+          <v-checkbox
+            v-for="option in question.options"
+            :key="option.id"
+            :label="option.option_text"
+            :value="option.id"
+            :input-value="userAnswers[question.id].includes(option.id)"
+            @change="onCheckboxChange(question.id, option.id)"
+          ></v-checkbox>
+        </div>
+      </div>
+
+      <v-btn color="primary" @click="submitTest">Отправить ответы</v-btn>
+    </v-form>
+
+    <!-- Модальное окно с результатами -->
+    <v-dialog v-model="resultsDialog" max-width="500">
+      <v-card>
+        <v-card-title class="headline">Результаты теста</v-card-title>
+        <v-card-text>
+          <p>Правильные ответы: {{ correctCount }}</p>
+          <p>Неправильные ответы: {{ incorrectCount }}</p>
+          <p>Ваш результат: {{ score }}%</p>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer></v-spacer>
+          <v-btn color="primary" @click="goToHome">Вернуться на главную страницу</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- Модальное окно для отправки жалобы -->
+    <v-dialog v-model="complaintDialog" max-width="600">
+      <v-card>
+        <v-card-title class="headline">Жалоба на тест</v-card-title>
+        <v-card-text>
+          <v-textarea
+            label="Опишите причину жалобы"
+            v-model="complaintText"
+            rows="5"
+          ></v-textarea>
+        </v-card-text>
+        <v-card-actions>
+          <v-btn text @click="complaintDialog = false">Отмена</v-btn>
+          <v-spacer></v-spacer>
+          <v-btn color="primary" @click="submitComplaint">Отправить</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+  </v-container>
+</template>
+
+
+<script>
+import { supabase } from '../supabase';
+
+
+export default {
+  name: 'TakeTest',
+  data() {
+    return {
+      test: {},
+      questions: [],
+      userAnswers: {},
+      correctCount: 0,
+      incorrectCount: 0,
+      score: 0,
+      resultsDialog: false, // Управление модальным окном результатов
+    };
+  },
+  async created() {
+    const testId = this.$route.params.testId;
+
+    const { data: test, error: testError } = await supabase
+      .from('tests')
+      .select('*')
+      .eq('id', testId)
+      .single();
+
+    if (testError) {
+      console.error('Ошибка при загрузке теста:', testError);
+      return;
+    }
+    this.test = test;
+
+    const { data: questions, error: questionsError } = await supabase
+      .from('questions')
+      .select('*, options(*)')
+      .eq('test_id', testId);
+
+    if (questionsError) {
+      console.error('Ошибка при загрузке вопросов:', questionsError);
+      return;
+    }
+
+    if (!questions || questions.length === 0) {
+      console.error('Вопросы не найдены для test_id:', testId);
+      return;
+    }
+
+    this.questions = questions.map((question) => ({
+      ...question,
+      options: question.options || [],
+    }));
+
+    this.questions.forEach((question) => {
+      if (question.question_type === 'multiple_choice') {
+        this.userAnswers[question.id] = [];
+      } else {
+        this.userAnswers[question.id] = '';
+      }
+    });
+  },
+  methods: {
+    onCheckboxChange(questionId, optionId) {
+      const selectedOptions = this.userAnswers[questionId];
+      const index = selectedOptions.indexOf(optionId);
+      if (index > -1) {
+        selectedOptions.splice(index, 1);
+      } else {
+        selectedOptions.push(optionId);
+      }
+      this.userAnswers[questionId] = [...selectedOptions];
+    },
+    async submitTest() {
+      for (const question of this.questions) {
+        const userAnswer = this.userAnswers[question.id];
+
+        if (
+          (question.question_type === 'free_text' && (!userAnswer || userAnswer.trim() === '')) ||
+          (question.question_type === 'single_choice' && (userAnswer === null || userAnswer === '')) ||
+          (question.question_type === 'multiple_choice' && (!Array.isArray(userAnswer) || userAnswer.length === 0))
+        ) {
+          alert(`Пожалуйста, ответьте на все вопросы перед отправкой.`);
+          return;
+        }
+      }
+
+      try {
+        const {
+          data: { user },
+          error: userError,
+        } = await supabase.auth.getUser();
+        if (userError || !user) {
+          console.error('Пользователь не авторизован');
+          return;
+        }
+
+        // Создаем новую попытку теста
+        const { data: attempt, error: attemptError } = await supabase
+          .from('test_attempts')
+          .insert([{ user_id: user.id, test_id: this.test.id }])
+          .select();
+
+        if (attemptError) throw attemptError;
+
+        let correctCount = 0;
+        let incorrectCount = 0;
+
+        for (const question of this.questions) {
+          const userAnswer = this.userAnswers[question.id];
+          let isCorrect = false;
+
+          if (question.question_type === 'free_text') {
+            const answerText = userAnswer || '';
+
+            // Получаем правильный ответ из options, где is_correct = true
+            const correctOption = question.options.find((option) => option.is_correct);
+            const correctAnswer = correctOption ? correctOption.option_text : '';
+
+            const normalizeString = (str) => {
+              return str
+                .trim()
+                .toLowerCase()
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .replace(/\s+/g, ' ');
+            };
+
+            const formattedUserAnswer = normalizeString(answerText);
+            const formattedCorrectAnswer = normalizeString(correctAnswer);
+
+            isCorrect = formattedUserAnswer === formattedCorrectAnswer;
+
+            // Сохраняем ответ пользователя
+            await supabase.from('user_answers').insert({
+              attempt_id: attempt[0].id,
+              question_id: question.id,
+              answer_text: answerText,
+              selected_option_id: null,
+            });
+
+            isCorrect ? correctCount++ : incorrectCount++;
+          } else if (question.question_type === 'single_choice') {
+            const selectedOption = question.options.find((option) => option.id === userAnswer);
+            const answerText = selectedOption ? selectedOption.option_text : 'EMPTY';
+            const selectedOptionId = selectedOption ? selectedOption.id : null;
+            isCorrect = selectedOption && selectedOption.is_correct;
+
+            // Сохраняем ответ пользователя
+            await supabase.from('user_answers').insert({
+              attempt_id: attempt[0].id,
+              question_id: question.id,
+              answer_text: answerText,
+              selected_option_id: selectedOptionId,
+            });
+
+            isCorrect ? correctCount++ : incorrectCount++;
+          } else if (question.question_type === 'multiple_choice' && Array.isArray(userAnswer)) {
+            // Сохраняем каждую выбранную опцию
+            for (const optionId of userAnswer) {
+              const selectedOption = question.options.find((option) => option.id === optionId);
+              if (selectedOption) {
+                const answerText = selectedOption.option_text;
+                const selectedOptionId = selectedOption.id;
+
+                await supabase.from('user_answers').insert({
+                  attempt_id: attempt[0].id,
+                  question_id: question.id,
+                  answer_text: answerText,
+                  selected_option_id: selectedOptionId,
+                });
+              }
+            }
+
+            const correctOptionIds = question.options
+              .filter((option) => option.is_correct)
+              .map((option) => option.id);
+
+            isCorrect =
+              userAnswer.length === correctOptionIds.length &&
+              userAnswer.every((id) => correctOptionIds.includes(id));
+
+            isCorrect ? correctCount++ : incorrectCount++;
+          } else {
+            alert(`Неизвестный тип вопроса: ${question.question_type}`);
+          }
+        }
+
+        // Обновляем результат попытки
+        const totalQuestions = this.questions.length;
+        const score = (correctCount / totalQuestions) * 100;
+
+        await supabase
+          .from('test_attempts')
+          .update({ score: score, finished_at: new Date().toISOString() })
+          .eq('id', attempt[0].id);
+
+        // Обновляем статистику пользователя
+        const { data: userStats } = await supabase
+          .from('user_statistics')
+          .select('tests_taken, average_score')
+          .eq('user_id', user.id)
+          .single();
+
+        if (userStats) {
+          const newAverageScore =
+            (userStats.average_score * userStats.tests_taken + score) / (userStats.tests_taken + 1);
+          await supabase
+            .from('user_statistics')
+            .update({
+              tests_taken: userStats.tests_taken + 1,
+              average_score: newAverageScore,
+            })
+            .eq('user_id', user.id);
+        } else {
+          await supabase.from('user_statistics').insert({
+            user_id: user.id,
+            tests_taken: 1,
+            average_score: score,
+          });
+        }
+
+        this.correctCount = correctCount;
+        this.incorrectCount = incorrectCount;
+        this.score = score;
+
+        // Открываем модальное окно с результатами
+        this.resultsDialog = true;
+      } catch (error) {
+        console.error('Ошибка при отправке ответов:', error);
+      }
+    },
+    goToHome() {
+      this.$router.push('/');
+    },
+  },
+};
+</script>
+
+<style>
+.question-block {
+  margin-bottom: 20px;
+}
+</style>
+
+
+//TestStatistics
+<template>
+  <v-container>
+    <h2>Статистика по тесту: {{ testTitle }}</h2>
+    <v-card class="pa-4">
+      <v-card-text>
+        <p>Количество попыток: {{ attempts.length }}</p>
+        <p>Средний балл: {{ averageScore.toFixed(2) }}%</p>
+
+        <h3>Попытки:</h3>
+        <v-data-table
+          :headers="attemptsHeaders"
+          :items="attempts"
+          class="elevation-1"
+          item-key="id"
+        >
+          <template #[`item.finished_at`]="{ item }">
+            <v-btn color="primary" @click="openAttemptDetails(item)">
+              {{ item.finished_at }}
+            </v-btn>
+          </template>
+        </v-data-table>
+      </v-card-text>
+    </v-card>
+
+    <!-- Модальное окно для подробностей по попытке -->
+    <v-dialog v-model="attemptDetailsDialog" max-width="800">
+      <v-card>
+        <v-card-title class="text-h5">{{ selectedAttemptDate }} — Детали попытки</v-card-title>
+        <v-card-text>
+          <div v-if="attemptQuestions.length > 0">
+            <div
+              v-for="(question, index) in attemptQuestions"
+              :key="index"
+              class="question-block"
+            >
+              <h4 :class="{ 'incorrect-question': !question.isCorrect }">
+                {{ question.question_text }}
+              </h4>
+
+              <!-- Вопрос со свободным ответом -->
+              <div v-if="question.question_type === 'free_text'">
+                <p>Ваш ответ: {{ question.userAnswerText }}</p>
+                <p>Правильный ответ: {{ question.correctAnswerText }}</p>
+              </div>
+
+              <!-- Вопрос с вариантами ответа -->
+              <div v-else>
+                <v-list dense>
+                  <v-list-item
+                    v-for="option in question.options"
+                    :key="option.id"
+                  >
+                    <!-- Иконка галочки или крестика -->
+                    <v-list-item-icon v-if="question.userSelection.includes(option.id)">
+                      <v-icon color="green" v-if="option.is_correct">mdi-check-circle</v-icon>
+                      <v-icon color="red" v-else>mdi-close-circle</v-icon>
+                    </v-list-item-icon>
+
+                    <!-- Отступ для невыбранных опций -->
+                    <v-list-item-icon v-else>
+                      <v-icon></v-icon>
+                    </v-list-item-icon>
+
+                    <v-list-item-content>
+                      <span
+                        :class="{
+                          'correct-answer': option.is_correct && !question.userSelection.includes(option.id),
+                          'user-wrong-answer': !option.is_correct && question.userSelection.includes(option.id)
+                        }"
+                      >
+                        {{ option.option_text }}
+                      </span>
+                    </v-list-item-content>
+                  </v-list-item>
+                </v-list>
+              </div>
+            </div>
+          </div>
+          <div v-else>Нет данных для отображения</div>
+        </v-card-text>
+        <v-card-actions>
+          <v-btn color="primary" text @click="attemptDetailsDialog = false">Закрыть</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+  </v-container>
+</template>
+
+<script>
+import { supabase } from '../supabase';
+
+export default {
+  name: 'TestStatistics',
+  data() {
+    return {
+      testId: null,
+      testTitle: '',
+      attempts: [],
+      averageScore: 0,
+      attemptQuestions: [],
+      selectedAttemptDate: '',
+      attemptDetailsDialog: false,
+      selectedAttemptId: null,
+      attemptsHeaders: [
+        { text: 'Дата завершения', value: 'finished_at' },
+        { text: 'Результат (%)', value: 'score' },
+      ],
+    };
+  },
+  async created() {
+    this.testId = this.$route.params.testId;
+    await this.fetchTestStatistics();
+  },
+  methods: {
+    async fetchTestStatistics() {
+      try {
+        const {
+          data: { user },
+          error: userError,
+        } = await supabase.auth.getUser();
+
+        if (userError || !user) {
+          console.error(
+            'Ошибка при получении данных о пользователе:',
+            userError?.message || 'Пользователь не авторизован'
+          );
+          return;
+        }
+
+        const { data: testData, error: testError } = await supabase
+          .from('tests')
+          .select('title')
+          .eq('id', this.testId)
+          .single();
+
+        if (testError) {
+          console.error('Ошибка при получении данных теста:', testError.message);
+          return;
+        }
+
+        this.testTitle = testData.title;
+
+        const { data: attemptsData, error: attemptsError } = await supabase
+          .from('test_attempts')
+          .select('id, finished_at, score')
+          .eq('user_id', user.id)
+          .eq('test_id', this.testId)
+          .order('finished_at', { ascending: false });
+
+        if (attemptsError) {
+          console.error('Ошибка при получении попыток:', attemptsError.message);
+          return;
+        }
+
+        this.attempts = attemptsData.map((attempt) => ({
+          id: attempt.id,
+          finished_at: attempt.finished_at
+            ? new Date(attempt.finished_at).toLocaleString()
+            : 'Не завершено',
+          score: attempt.score ? attempt.score.toFixed(2) : '0',
+        }));
+
+        this.averageScore =
+          this.attempts.reduce((sum, attempt) => sum + (parseFloat(attempt.score) || 0), 0) /
+          this.attempts.length;
+      } catch (error) {
+        console.error('Ошибка при получении статистики теста:', error.message);
+      }
+    },
+
+    async openAttemptDetails(attempt) {
+      if (!attempt.id) {
+        console.error('Попытка не имеет id:', attempt);
+        return;
+      }
+
+      this.selectedAttemptId = attempt.id;
+      this.selectedAttemptDate = attempt.finished_at;
+      this.attemptQuestions = [];
+      this.attemptDetailsDialog = true;
+
+      try {
+        const { data: questionsData, error: questionsError } = await supabase
+          .from('questions')
+          .select(
+            `
+            id, question_text, question_type,
+            options (id, option_text, is_correct),
+            user_answers!inner(selected_option_id, answer_text)
+          `
+          )
+          .eq('test_id', this.testId)
+          .eq('user_answers.attempt_id', this.selectedAttemptId);
+
+        if (questionsError) {
+          console.error('Ошибка при загрузке вопросов:', questionsError.message);
+          return;
+        }
+
+        this.attemptQuestions = questionsData.map((question) => {
+          const userSelection = question.user_answers
+            .map((answer) => answer.selected_option_id)
+            .filter((id) => id !== null); // Для вопросов со свободным ответом selected_option_id может быть null
+
+          const userAnswerText = question.user_answers
+            .map((answer) => answer.answer_text)
+            .find((text) => text !== null) || '';
+
+          const correctOptionIds = question.options
+            .filter((option) => option.is_correct)
+            .map((option) => option.id);
+
+          let isCorrect = false;
+          let correctAnswerText = '';
+
+          if (question.question_type === 'free_text') {
+            const correctOption = question.options.find((option) => option.is_correct);
+            correctAnswerText = correctOption ? correctOption.option_text : '';
+
+            const normalizeString = (str) => {
+              return str
+                .trim()
+                .toLowerCase()
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .replace(/\s+/g, ' ');
+            };
+
+            const formattedUserAnswer = normalizeString(userAnswerText);
+            const formattedCorrectAnswer = normalizeString(correctAnswerText);
+
+            isCorrect = formattedUserAnswer === formattedCorrectAnswer;
+          } else if (question.question_type === 'multiple_choice') {
+            isCorrect =
+              userSelection.length === correctOptionIds.length &&
+              userSelection.every((id) => correctOptionIds.includes(id));
+          } else if (question.question_type === 'single_choice') {
+            isCorrect =
+              userSelection.length === 1 && correctOptionIds.includes(userSelection[0]);
+          }
+
+          return {
+            ...question,
+            userSelection,
+            userAnswerText,
+            isCorrect,
+            correctAnswerText,
+          };
+        });
+      } catch (error) {
+        console.error('Ошибка при загрузке вопросов:', error.message);
+      }
+    },
+  },
+};
+</script>
+
+<style>
+.v-card {
+  max-width: 800px;
+  margin: auto;
+}
+.correct-answer {
+  color: green;
+  font-style: italic;
+}
+.user-wrong-answer {
+  color: red;
+}
+.incorrect-question {
+  color: red;
+}
+</style>
+
+
+//TestUsers
+<template>
+  <v-container>
+    <v-card>
+      <v-card-title>Пользователи, прошедшие тест "{{ testTitle }}"</v-card-title>
+      <v-card-text>
+        <v-list>
+          <v-list-item
+            v-for="user in users"
+            :key="user.id"
+            @click="viewUserAttempts(user.id)"
+          >
+            <v-list-item-content>
+              <v-list-item-title>{{ user.username }}</v-list-item-title>
+            </v-list-item-content>
+          </v-list-item>
+        </v-list>
+      </v-card-text>
+    </v-card>
+  </v-container>
+</template>
+
+<script>
+import { supabase } from '../supabase';
+
+export default {
+  name: 'TestUsers',
+  data() {
+    return {
+      testId: null,
+      testTitle: '',
+      users: [],
+    };
+  },
+  async created() {
+    this.testId = this.$route.params.testId;
+    await this.fetchUsers();
+  },
+  methods: {
+    async fetchUsers() {
+      try {
+        // Получаем название теста
+        const { data: testData, error: testError } = await supabase
+          .from('tests')
+          .select('title')
+          .eq('id', this.testId)
+          .single();
+
+        if (testError) {
+          console.error('Ошибка при получении данных теста:', testError.message);
+          return;
+        }
+
+        this.testTitle = testData.title;
+
+        // Получаем список уникальных пользователей, прошедших тест
+        const { data: attemptsData, error: attemptsError } = await supabase
+          .from('test_attempts')
+          .select('user_id, users(username)')
+          .eq('test_id', this.testId);
+
+        if (attemptsError) {
+          console.error('Ошибка при получении попыток:', attemptsError.message);
+          return;
+        }
+
+        // Создаем уникальный список пользователей
+        const uniqueUsersMap = {};
+        attemptsData.forEach((attempt) => {
+          const userId = attempt.user_id;
+          if (!uniqueUsersMap[userId]) {
+            uniqueUsersMap[userId] = {
+              id: userId,
+              username: attempt.users.username,
+            };
+          }
+        });
+
+        this.users = Object.values(uniqueUsersMap);
+      } catch (error) {
+        console.error('Ошибка при получении пользователей:', error.message);
+      }
+    },
+    viewUserAttempts(userId) {
+      this.$router.push({
+        name: 'UserAttempts',
+        params: { testId: this.testId, userId },
+      });
+    },
+  },
+};
+</script>
+
+
+//UserAttempts
+<template>
+  <v-container>
+    <v-card>
+      <v-card-title>
+        Попытки пользователя {{ userName }} в тесте "{{ testTitle }}"
+      </v-card-title>
+      <v-card-text>
+        <v-list>
+          <v-list-item
+            v-for="attempt in attempts"
+            :key="attempt.id"
+            @click="viewAttemptDetails(attempt)"
+          >
+            <v-list-item-content>
+              <v-list-item-title>
+                {{ attempt.finished_at
+                  ? new Date(attempt.finished_at).toLocaleString()
+                  : 'Не завершено' }}
+                — Результат: {{ attempt.score ? attempt.score.toFixed(2) : '0' }}%
+              </v-list-item-title>
+            </v-list-item-content>
+          </v-list-item>
+        </v-list>
+      </v-card-text>
+    </v-card>
+
+    <!-- Модальное окно для подробностей по попытке -->
+    <v-dialog v-model="attemptDetailsDialog" max-width="800">
+      <v-card>
+        <v-card-title class="text-h5">
+          {{ selectedAttemptDate }} — Детали попытки
+        </v-card-title>
+        <v-card-text>
+          <!-- Переиспользуем отображение деталей попытки -->
+          <div v-if="attemptQuestions.length > 0">
+            <!-- Отображение вопросов и ответов -->
+            <div
+              v-for="(question, index) in attemptQuestions"
+              :key="index"
+              class="question-block"
+            >
+              <h4 :class="{ 'incorrect-question': !question.isCorrect }">
+                {{ question.question_text }}
+              </h4>
+
+              <!-- Вопрос со свободным ответом -->
+              <div v-if="question.question_type === 'free_text'">
+                <p>Ответ пользователя: {{ question.userAnswerText }}</p>
+                <p>Правильный ответ: {{ question.correctAnswerText }}</p>
+              </div>
+
+              <!-- Вопрос с вариантами ответа -->
+              <div v-else>
+                <v-list dense>
+                  <v-list-item v-for="option in question.options" :key="option.id">
+                    <v-list-item-icon
+                      v-if="question.userSelection.includes(option.id)"
+                    >
+                      <v-icon color="green" v-if="option.is_correct"
+                        >mdi-check-circle</v-icon
+                      >
+                      <v-icon color="red" v-else>mdi-close-circle</v-icon>
+                    </v-list-item-icon>
+
+                    <!-- Отступ для невыбранных опций -->
+                    <v-list-item-icon v-else>
+                      <v-icon></v-icon>
+                    </v-list-item-icon>
+
+                    <v-list-item-content>
+                      <span
+                        :class="{
+                          'correct-answer':
+                            option.is_correct &&
+                            !question.userSelection.includes(option.id),
+                          'user-wrong-answer':
+                            !option.is_correct &&
+                            question.userSelection.includes(option.id),
+                        }"
+                      >
+                        {{ option.option_text }}
+                      </span>
+                    </v-list-item-content>
+                  </v-list-item>
+                </v-list>
+              </div>
+            </div>
+          </div>
+          <div v-else>Нет данных для отображения</div>
+        </v-card-text>
+        <v-card-actions>
+          <v-btn color="primary" text @click="attemptDetailsDialog = false">
+            Закрыть
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+  </v-container>
+</template>
+
+<script>
+import { supabase } from '../supabase';
+
+export default {
+  name: 'UserAttempts',
+  data() {
+    return {
+      testId: null,
+      userId: null,
+      testTitle: '',
+      userName: '',
+      attempts: [],
+      attemptDetailsDialog: false,
+      selectedAttempt: null,
+      selectedAttemptDate: '',
+      attemptQuestions: [],
+    };
+  },
+  async created() {
+    this.testId = this.$route.params.testId;
+    this.userId = this.$route.params.userId;
+    await this.fetchAttempts();
+  },
+  methods: {
+    async fetchAttempts() {
+      try {
+        // Получаем название теста
+        const { data: testData, error: testError } = await supabase
+          .from('tests')
+          .select('title')
+          .eq('id', this.testId)
+          .single();
+
+        if (testError) {
+          console.error('Ошибка при получении данных теста:', testError.message);
+          return;
+        }
+
+        this.testTitle = testData.title;
+
+        // Получаем имя пользователя
+        const { data: userData, error: userError } = await supabase
+          .from('users')
+          .select('username')
+          .eq('id', this.userId)
+          .single();
+
+        if (userError) {
+          console.error('Ошибка при получении данных пользователя:', userError.message);
+          return;
+        }
+
+        this.userName = userData.username;
+
+        // Получаем попытки пользователя
+        const { data: attemptsData, error: attemptsError } = await supabase
+          .from('test_attempts')
+          .select('id, finished_at, score')
+          .eq('test_id', this.testId)
+          .eq('user_id', this.userId)
+          .order('finished_at', { ascending: false });
+
+        if (attemptsError) {
+          console.error('Ошибка при получении попыток:', attemptsError.message);
+          return;
+        }
+
+        this.attempts = attemptsData;
+      } catch (error) {
+        console.error('Ошибка при получении попыток пользователя:', error.message);
+      }
+    },
+    async viewAttemptDetails(attempt) {
+      this.selectedAttempt = attempt;
+      this.selectedAttemptDate = attempt.finished_at
+        ? new Date(attempt.finished_at).toLocaleString()
+        : 'Не завершено';
+      this.attemptDetailsDialog = true;
+      await this.fetchAttemptDetails();
+    },
+    async fetchAttemptDetails() {
+      try {
+        // Переиспользуем код для загрузки деталей попытки
+        const { data: questionsData, error: questionsError } = await supabase
+          .from('questions')
+          .select(
+            `
+            id, question_text, question_type,
+            options (id, option_text, is_correct),
+            user_answers!inner(selected_option_id, answer_text)
+          `
+          )
+          .eq('test_id', this.testId)
+          .eq('user_answers.attempt_id', this.selectedAttempt.id);
+
+        if (questionsError) {
+          console.error('Ошибка при загрузке вопросов:', questionsError.message);
+          return;
+        }
+
+        this.attemptQuestions = questionsData.map((question) => {
+          const userSelection = question.user_answers
+            .map((answer) => answer.selected_option_id)
+            .filter((id) => id !== null);
+
+          const userAnswerText =
+            question.user_answers
+              .map((answer) => answer.answer_text)
+              .find((text) => text !== null) || '';
+
+          const correctOptionIds = question.options
+            .filter((option) => option.is_correct)
+            .map((option) => option.id);
+
+          let isCorrect = false;
+          let correctAnswerText = '';
+
+          if (question.question_type === 'free_text') {
+            const correctOption = question.options.find((option) => option.is_correct);
+            correctAnswerText = correctOption ? correctOption.option_text : '';
+
+            const normalizeString = (str) => {
+              return str
+                .trim()
+                .toLowerCase()
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .replace(/\s+/g, ' ');
+            };
+
+            const formattedUserAnswer = normalizeString(userAnswerText);
+            const formattedCorrectAnswer = normalizeString(correctAnswerText);
+
+            isCorrect = formattedUserAnswer === formattedCorrectAnswer;
+          } else if (question.question_type === 'multiple_choice') {
+            isCorrect =
+              userSelection.length === correctOptionIds.length &&
+              userSelection.every((id) => correctOptionIds.includes(id));
+          } else if (question.question_type === 'single_choice') {
+            isCorrect =
+              userSelection.length === 1 && correctOptionIds.includes(userSelection[0]);
+          }
+
+          return {
+            ...question,
+            userSelection,
+            userAnswerText,
+            isCorrect,
+            correctAnswerText,
+          };
+        });
+      } catch (error) {
+        console.error('Ошибка при загрузке деталей попытки:', error.message);
+      }
+    },
+  },
+};
+</script>
+
+<style>
+.v-card {
+  max-width: 800px;
+  margin: auto;
+}
+.correct-answer {
+  color: green;
+  font-style: italic;
+}
+.user-wrong-answer {
+  color: red;
+}
+.incorrect-question {
+  color: red;
+}
+</style>
+
+
+//userProfile
+<template>
+  <v-container>
+    <v-card>
+      <v-card-title>Личный кабинет</v-card-title>
+      <v-card-text>
+        <p><strong>Имя пользователя:</strong> {{ user.username }}</p>
+        <p><strong>Электронная почта:</strong> {{ user.email }}</p>
+        <!-- Кнопка удаления аккаунта удалена -->
+      </v-card-text>
+    </v-card>
+  </v-container>
+</template>
+
+<script>
+import { supabase } from '../supabase';
+
+export default {
+  name: 'UserProfile',
+  data() {
+    return {
+      user: {
+        username: '',
+        email: '',
+      },
+    };
+  },
+  async mounted() {
+    await this.fetchUserProfile();
+  },
+  methods: {
+    async fetchUserProfile() {
+      const { data: { user }, error } = await supabase.auth.getUser();
+
+      if (error) {
+        console.error('Ошибка при получении данных о пользователе:', error.message);
+        return;
+      }
+
+      if (user) {
+        const { data, error: userDataError } = await supabase
+          .from('users')
+          .select('username, email')
+          .eq('id', user.id)
+          .single();
+
+        if (userDataError) {
+          console.error('Ошибка при загрузке профиля:', userDataError.message);
+        } else {
+          this.user.username = data.username;
+          this.user.email = data.email;
+        }
+      }
+    },
+  },
+};
+</script>
+
+<style>
+.error {
+  color: red;
+}
+.success {
+  color: green;
+}
+</style>
+
+
+
+//UserRegister
+<template>
+  <v-container>
+    <v-row justify="center">
+      <v-col cols="12" md="6">
+        <v-card>
+          <v-card-title class="text-center">Регистрация</v-card-title>
+          <v-card-text>
+            <v-form>
+              <v-text-field label="E-mail" v-model="email" required></v-text-field>
+              <v-text-field label="Пароль" v-model="password" type="password" required></v-text-field>
+              <v-btn @click="register" color="error" block>Зарегистрироваться</v-btn>
+            </v-form>
+          </v-card-text>
+        </v-card>
+      </v-col>
+    </v-row>
+  </v-container>
+</template>
+
+<script>
+export default {
+  name: 'UserRegister',
+  data() {
+    return {
+      email: '',
+      password: ''
+    };
+  },
+  methods: {
+    register() {
+      console.log(this.email, this.password);
+    }
+  }
+};
+
+</script>
+
+
+
+//Users
+<!-- src/components/Users.vue -->
+<template>
+  <v-container>
+    <h2>Пользователи</h2>
+    <v-text-field
+      v-model="searchQuery"
+      label="Поиск пользователей"
+      append-icon="mdi-magnify"
+      outlined
+      dense
+      @input="fetchUsers"
+    ></v-text-field>
+
+    <v-list>
+      <v-list-item
+        v-for="user in filteredUsers"
+        :key="user.id"
+        @click="goToUserProfile(user.id)"
+      >
+        <v-list-item-content>
+          <v-list-item-title>{{ user.username }}</v-list-item-title>
+          <v-list-item-subtitle>{{ user.email }}</v-list-item-subtitle>
+        </v-list-item-content>
+      </v-list-item>
+    </v-list>
+  </v-container>
+</template>
+
+<script>
+import { supabase } from '../supabase';
+
+export default {
+  name: 'UsersPage', // Измените на многословное имя, например, UsersPage
+  data() {
+    return {
+      users: [],
+      searchQuery: '',
+    };
+  },
+  computed: {
+    filteredUsers() {
+      return this.users.filter(user =>
+        user.username.toLowerCase().includes(this.searchQuery.toLowerCase())
+      );
+    },
+  },
+  methods: {
+  async fetchUsers() {
+    const { data: users, error } = await supabase
+      .from('users')
+      .select('id, username, email');
+
+    if (error) {
+      console.error('Ошибка при получении пользователей:', error);
+    } else {
+      this.users = users;
+    }
+  },
+  goToUserProfile(userId) {
+    this.$router.push({ name: 'ProfileUsers', params: { userId } }); // Перенаправляем на страницу ProfileUsers
+  },
+},
+};
+</script>
+
+
+
+//index
+import { createRouter, createWebHistory } from 'vue-router';
+import Home from '../views/userHome.vue';
+import CreateTest from '../components/CreateTest.vue';
+import MyTests from '../components/MyTests.vue';
+import MyStatistics from '../components/MyStatistics.vue';
+import Profile from '../components/userProfile.vue';
+import TakeTest from '../components/TakeTest.vue';
+import AuthPage from '../views/AuthPage.vue';
+import UsersPage from '../components/Users.vue';
+import ProfileUsers from '../components/ProfileUsers.vue';
+import { supabase } from '../supabase';
+import TestStatistics from '../components/TestStatistics.vue';
+import TestUsers from '@/components/TestUsers.vue';
+import UserAttempts from '@/components/UserAttempts.vue';
+import EditTest from '../components/EditTest.vue';
+
+const routes = [
+  { path: '/auth', name: 'AuthPage', component: AuthPage },
+  { path: '/home', name: 'userHome', component: Home, meta: { requiresAuth: true } },
+  { path: '/create-test', name: 'CreateTest', component: CreateTest, meta: { requiresAuth: true } },
+  { path: '/my-tests', name: 'MyTests', component: MyTests, meta: { requiresAuth: true } },
+  { path: '/my-statistics', name: 'MyStatistics', component: MyStatistics, meta: { requiresAuth: true } },
+  { path: '/profile', name: 'userProfile', component: Profile, meta: { requiresAuth: true } },
+  { path: '/tests/:testId', name: 'TakeTest', component: TakeTest, meta: { requiresAuth: true } },
+  { path: '/users', name: 'UsersPage', component: UsersPage, meta: { requiresAuth: true } }, 
+  { path: '/users/:userId', name: 'ProfileUsers', component: ProfileUsers, meta: { requiresAuth: true } },
+  { path: '/', redirect: '/auth' },
+  { path: '/test-statistics/:testId', name: 'TestStatistics', component: TestStatistics, meta: { requiresAuth: true } },
+  { path: '/test-users/:testId', name: 'TestUsers', component: TestUsers, props: true, },
+  { path: '/user-attempts/:testId/:userId', name: 'UserAttempts', component: UserAttempts, props: true, },
+  { path: '/EditTest/:testId', name: 'EditTest', component: EditTest, props: true, },
+ 
+];
+
+const router = createRouter({
+  history: createWebHistory(process.env.BASE_URL),
+  routes,
+});
+
+router.beforeEach(async (to, from, next) => {
+  const requiresAuth = to.matched.some((record) => record.meta.requiresAuth);
+  const { data: { user } } = await supabase.auth.getUser();
+
+  if (requiresAuth && !user) {
+    next('/auth');
+  } else if (to.path === '/auth' && user) {
+    next('/home');
+  } else {
+    next();
+  }
+});
+
+export default router;
+
+
+
+//AuthPage
+<template>
+  <v-container class="pa-16 d-flex align-center justify-center">
+    <v-card class="pa-5" max-width="500">
+      <v-card-title class="text-h5 text-center">Войдите или зарегистрируйтесь</v-card-title>
+
+      <v-tabs v-model="authMode" background-color="primary" dark>
+        <v-tab>Вход</v-tab>
+        <v-tab>Регистрация</v-tab>
+      </v-tabs>
+
+      <!-- Вкладка для входа -->
+      <v-tab-item v-if="authMode === 0">
+        <v-text-field
+          label="Email"
+          v-model="loginData.email"
+          type="email"
+          required
+        ></v-text-field>
+        <v-text-field
+          label="Пароль"
+          v-model="loginData.password"
+          type="password"
+          required
+        ></v-text-field>
+        <v-btn color="primary" @click="login">Войти</v-btn>
+        <p v-if="loginError" class="error">{{ loginError }}</p>
+      </v-tab-item>
+
+      <!-- Вкладка для регистрации -->
+      <v-tab-item v-if="authMode === 1">
+        <v-text-field
+          label="Имя пользователя"
+          v-model="registerData.username"
+          required
+        ></v-text-field>
+        <v-text-field
+          label="Email"
+          v-model="registerData.email"
+          type="email"
+          required
+        ></v-text-field>
+        <v-text-field
+          label="Пароль"
+          v-model="registerData.password"
+          type="password"
+          required
+        ></v-text-field>
+        <v-btn color="primary" @click="register">Зарегистрироваться</v-btn>
+        <p v-if="registerError" class="error">{{ registerError }}</p>
+        <p v-if="registerSuccess" class="success">{{ registerSuccess }}</p>
+      </v-tab-item>
+    </v-card>
+  </v-container>
+</template>
+
+<script>
+import { supabase } from '../supabase';
+
+export default {
+  name: 'AuthPage',
+  data() {
+    return {
+      authMode: 0, // 0 для входа, 1 для регистрации
+      loginData: {
+        email: '',
+        password: '',
+      },
+      registerData: {
+        username: '',
+        email: '',
+        password: '',
+      },
+      loginError: null,
+      registerError: null,
+      registerSuccess: null,
+    };
+  },
+  methods: {
+    async login() {
+      const { email, password } = this.loginData;
+      this.loginError = null;
+
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) {
+        this.loginError = 'Неверный email или пароль';
+      } else {
+        this.$router.push('/home'); // Перенаправляем на главную страницу
+      }
+    },
+    
+    async register() {
+      const { email, password, username } = this.registerData;
+      this.registerError = null;
+      this.registerSuccess = null;
+
+      // Регистрация пользователя в Supabase
+      const { error: signUpError, data } = await supabase.auth.signUp({
+        email,
+        password,
+        options: { data: { username } } // Передаем username как метаданные
+      });
+
+      if (signUpError) {
+        this.registerError = 'Ошибка при регистрации: ' + signUpError.message;
+      } else if (data.user) {
+        // Добавляем пользователя в таблицу users с использованием его UID
+        const { error: insertError } = await supabase.from('users').insert([
+          {
+            id: data.user.id, // Используем UID из auth.users
+            username,
+            email,
+            password_hash: password, // Сохраните пароль в безопасном виде, если это необходимо
+          }
+        ]);
+
+        if (insertError) {
+          this.registerError = 'Ошибка при добавлении пользователя в базу данных: ' + insertError.message;
+        } else {
+          this.registerSuccess = 'Успешная регистрация! Теперь вы можете войти.';
+          
+          // Перенаправление на страницу userHome после успешной регистрации
+          setTimeout(() => {
+            this.$router.push('/home');
+          }, 2000); // Пауза в 2 секунды перед перенаправлением
+
+          // Очистка данных после успешной регистрации
+          this.registerData = { username: '', email: '', password: '' };
+        }
+      }
+    },
+  },
+};
+</script>
+
+<style>
+.error {
+  color: red;
+  margin-top: 10px;
+}
+.success {
+  color: green;
+  margin-top: 10px;
+}
+</style>
+
+
+
+//NavBar
+<template>
+  <div v-if="isAuthenticated">
+    <v-app-bar app color="primary" dark>
+      <v-toolbar-title @click="goToHome" style="cursor: pointer;">
+        Платформа для тестирования
+      </v-toolbar-title>
+      <v-spacer></v-spacer>
+
+      
+
+      <v-btn icon @click="drawer = !drawer">
+        <v-icon>mdi-menu</v-icon>
+      </v-btn>
+    </v-app-bar>
+
+    <!-- Боковая навигация -->
+    <v-navigation-drawer v-model="drawer" app right>
+      <v-list>
+        <v-list-item @click="goToMyTests">
+          <v-list-item-icon>
+            <v-icon>mdi-file-document-outline</v-icon>
+          </v-list-item-icon>
+          <v-list-item-content>
+            <v-list-item-title>Мои тесты</v-list-item-title>
+          </v-list-item-content>
+        </v-list-item>
+
+        <v-list-item @click="goToMyStatistics">
+          <v-list-item-icon>
+            <v-icon>mdi-chart-bar</v-icon>
+          </v-list-item-icon>
+          <v-list-item-content>
+            <v-list-item-title>Моя статистика</v-list-item-title>
+          </v-list-item-content>
+        </v-list-item>
+
+        <v-list-item @click="goToProfile">
+          <v-list-item-icon>
+            <v-icon>mdi-account-circle</v-icon>
+          </v-list-item-icon>
+          <v-list-item-content>
+            <v-list-item-title>Личный кабинет</v-list-item-title>
+          </v-list-item-content>
+        </v-list-item>
+
+        <!-- Новая вкладка для пользователей -->
+        <v-list-item @click="goToUsers">
+          <v-list-item-icon>
+            <v-icon>mdi-account-group</v-icon> <!-- Иконка группы пользователей -->
+          </v-list-item-icon>
+          <v-list-item-content>
+            <v-list-item-title>Пользователи</v-list-item-title>
+          </v-list-item-content>
+        </v-list-item>
+
+        <v-list-item @click="goToHome">
+          <v-list-item-icon>
+            <v-icon>mdi-home</v-icon> <!-- Иконка домика -->
+          </v-list-item-icon>
+          <v-list-item-content>
+            <v-list-item-title>Главная</v-list-item-title>
+          </v-list-item-content>
+        </v-list-item>
+
+        
+        <v-list-item @click="logout">
+          <v-list-item-icon>
+            <v-icon>mdi-door</v-icon> <!-- Иконка двери -->
+          </v-list-item-icon>
+          <v-list-item-content>
+            <v-list-item-title>Выйти</v-list-item-title>
+          </v-list-item-content>
+        </v-list-item>
+      </v-list>
+    </v-navigation-drawer>
+  </div>
+</template>
+
+<script>
+import { supabase } from '../supabase';
+
+export default {
+  name: 'NavBar',
+  data() {
+    return {
+      drawer: false,
+      isAuthenticated: false,
+    };
+  },
+  async mounted() {
+    // Проверка статуса авторизации при загрузке компонента
+    const { data: { user } } = await supabase.auth.getUser();
+    this.isAuthenticated = !!user;
+
+    // Подписка на изменения авторизации
+    supabase.auth.onAuthStateChange((event, session) => {
+      this.isAuthenticated = !!session;
+    });
+  },
+  methods: {
+    goToHome() {
+      this.$router.push('/');
+    },
+    goToMyTests() {
+      this.$router.push('/my-tests');
+    },
+    goToMyStatistics() {
+      this.$router.push('/my-statistics');
+    },
+    goToProfile() {
+      this.$router.push('/profile');
+    },
+    goToUsers() {
+      this.$router.push('/users'); // Переход на страницу пользователей
+    },
+    async logout() {
+      await supabase.auth.signOut();
+      this.isAuthenticated = false;
+      this.$router.push('/auth');
+    },
+  },
+};
+</script>
+
+
+
+
+//userHome
+<template>
+  <v-container>
+    <!-- Тесты пользователя -->
+    <v-row>
+      <v-col cols="12">
+        <h3>Мои тесты</h3>
+      </v-col>
+      <v-col cols="12" md="6" v-for="test in filteredMyTests" :key="test.id">
+        <v-card class="mb-4">
+          <v-card-title>{{ test.title }}</v-card-title>
+          <v-card-text>{{ test.description }}</v-card-text>
+          <v-card-actions>
+            <v-btn color="primary" @click="editTest(test)">Редактировать</v-btn>
+            <v-btn color="error" @click="deleteTest(test.id)">Удалить</v-btn>
+            <v-spacer></v-spacer>
+            <v-icon v-if="test.password">mdi-lock</v-icon>
+          </v-card-actions>
+        </v-card>
+      </v-col>
+    </v-row>
+
+    <!-- Кнопка "Создать тест" -->
+    <v-row justify="center" class="my-5">
+      <v-btn color="primary" @click="goToCreateTest">
+        Создать тест
+      </v-btn>
+    </v-row>
+
+    <!-- Поиск и фильтрация тестов -->
+    <v-row class="my-3">
+      <v-col cols="12" sm="8">
+        <v-text-field
+          v-model="searchQuery"
+          label="Поиск"
+          append-icon="mdi-magnify"
+          @input="fetchTests"
+          outlined
+          dense
+        ></v-text-field>
+      </v-col>
+      <v-col cols="12" sm="4">
+        <v-checkbox
+          v-model="showPasswordTests"
+          label="Показывать тесты с паролями"
+          hide-details
+          dense
+        ></v-checkbox>
+      </v-col>
+    </v-row>
+
+    <!-- Тесты других пользователей -->
+    <v-row>
+      <v-col cols="12">
+        <h3>Тесты других пользователей</h3>
+      </v-col>
+      <v-col cols="12" md="6" v-for="test in filteredOtherTests" :key="test.id">
+        <v-card class="mb-4">
+          <v-card-title>{{ test.title }}</v-card-title>
+          <v-card-subtitle>Автор: {{ test.author }}</v-card-subtitle>
+          <v-card-text>{{ test.description }}</v-card-text>
+          <v-card-actions>
+            <!-- Убираем кнопку, если пользователь исчерпал все попытки -->
+            <template v-if="!hasReachedAttemptLimit(test)">
+              <v-btn color="secondary" @click="takeTest(test)">
+                Пройти тест
+              </v-btn>
+            </template>
+            <!-- Показать замочек, если лимит попыток достигнут -->
+            <template v-else>
+              <v-icon color="red">mdi-lock</v-icon>
+            </template>
+            <v-spacer></v-spacer>
+            <v-icon v-if="test.password">mdi-lock</v-icon>
+          </v-card-actions>
+        </v-card>
+      </v-col>
+    </v-row>
+  </v-container>
+</template>
+
+<script>
+import { supabase } from '../supabase';
+
+export default {
+  name: 'userHome',
+  data() {
+    return {
+      tests: [], // Список всех тестов
+      myTests: [], // Список тестов пользователя
+      searchQuery: '', // Поле для поиска
+      showPasswordTests: false, // Флаг для показа тестов с паролями (только для тестов других пользователей)
+      userAttempts: {}, // Попытки пользователя по каждому тесту
+      testLimits: {}, // Лимиты попыток для тестов
+    };
+  },
+  computed: {
+    // Фильтрация тестов пользователя
+    filteredMyTests() {
+      return this.myTests.filter(test => {
+        const matchesSearch = test.title.toLowerCase().includes(this.searchQuery.toLowerCase());
+        return matchesSearch; // Тесты пользователя всегда показываются, независимо от публичности или пароля
+      });
+    },
+    // Фильтрация тестов других пользователей
+    filteredOtherTests() {
+      return this.tests.filter(test => {
+        const matchesSearch = test.title.toLowerCase().includes(this.searchQuery.toLowerCase()) ||
+          test.author.toLowerCase().includes(this.searchQuery.toLowerCase());
+        const matchesPassword = this.showPasswordTests || !test.password; // Фильтрация по паролю только для чужих тестов
+        const isPublicTest = test.publick; // Только публичные тесты показываются
+        const isNotUserTest = !this.myTests.some(myTest => myTest.id === test.id); // Исключаем тесты пользователя
+        return matchesSearch && matchesPassword && isPublicTest && isNotUserTest;
+      });
+    },
+  },
+  methods: {
+    // Проверка, достиг ли пользователь лимита попыток
+    hasReachedAttemptLimit(test) {
+      const attempts = this.userAttempts[test.id] || 0;
+      const maxAttempts = this.testLimits[test.id] || 1; // Если лимит не установлен, считаем его равным 1
+      return attempts >= maxAttempts;
+    },
+
+    // Функция получения списка тестов
+    async fetchTests() {
+      const { data: tests, error } = await supabase
+        .from('tests')
+        .select('*, users(username), test_limits(max_attempts)')
+        .order('created_at', { ascending: false }); // Упорядочиваем тесты по дате создания, новые тесты сверху
+
+      if (error) {
+        console.error('Ошибка при получении тестов:', error);
+      } else {
+        this.tests = tests.map((test) => ({
+          ...test,
+          maxAttempts: test.test_limits ? test.test_limits.max_attempts : null,
+          author: test.users.username, // Присваиваем имя пользователя как автора
+        }));
+        this.fetchMyTests(); // Получаем тесты пользователя
+        this.fetchUserAttempts(); // Загружаем попытки пользователя
+        this.fetchTestLimits(); // Загружаем лимиты на попытки
+      }
+    },
+
+    // Получение тестов пользователя
+    async fetchMyTests() {
+      const { data: { user } } = await supabase.auth.getUser();
+      this.myTests = this.tests
+        .filter(test => test.user_id === user.id)
+        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at)); // Дополнительная сортировка на случай, если это не применяется по умолчанию
+    },
+
+    // Получение попыток пользователя
+    async fetchUserAttempts() {
+      try {
+        const { data: { user }, error: userError } = await supabase.auth.getUser();
+
+        if (userError || !user) {
+          console.error('Ошибка при получении данных о пользователе:', userError?.message || 'Пользователь не авторизован');
+          return;
+        }
+
+        const userId = user.id;
+
+        // Получаем список всех попыток пользователя
+        const { data: attempts, error: attemptsError } = await supabase
+          .from('test_attempts')
+          .select('test_id, score') // Получаем ID теста и баллы
+          .eq('user_id', userId);
+
+        if (attemptsError) {
+          console.error('Ошибка при загрузке попыток тестов:', attemptsError.message);
+          return;
+        }
+
+        const attemptsMap = {};
+
+        // Перебираем все попытки и считаем их для каждого теста
+        attempts.forEach(attempt => {
+          const testId = attempt.test_id;
+          if (!attemptsMap[testId]) {
+            attemptsMap[testId] = 0; // Инициализируем счетчик попыток для каждого теста
+          }
+          attemptsMap[testId] += 1; // Увеличиваем количество попыток для теста
+        });
+
+        this.userAttempts = attemptsMap; // Сохраняем статистику попыток
+
+      } catch (error) {
+        console.error('Ошибка при получении статистики:', error.message);
+      }
+    },
+
+    // Получение лимитов на количество попыток
+    async fetchTestLimits() {
+      try {
+        const { data: limits, error } = await supabase
+          .from('test_limits')
+          .select('test_id, max_attempts');
+
+        if (error) {
+          console.error('Ошибка при получении лимитов попыток:', error.message);
+          return;
+        }
+
+        const limitsMap = {};
+        limits.forEach(limit => {
+          limitsMap[limit.test_id] = limit.max_attempts;
+        });
+
+        this.testLimits = limitsMap; // Сохраняем лимиты для дальнейшего использования
+      } catch (error) {
+        console.error('Ошибка при получении лимитов:', error.message);
+      }
+    },
+
+    // Переход к созданию теста
+    goToCreateTest() {
+      this.$router.push('/create-test');
+    },
+
+    // Обработка нажатия на кнопку "Пройти тест"
+    takeTest(test) {
+      if (test.password) {
+        this.promptPassword(test);
+      } else {
+        this.$router.push(`/tests/${test.id}`);
+      }
+    },
+
+    // Окно для ввода пароля
+    async promptPassword(test) {
+      const password = prompt('Введите пароль для теста:');
+      if (password === test.password) {
+        this.$router.push(`/tests/${test.id}`);
+      } else {
+        alert('Неверный пароль');
+      }
+    },
+
+    // Редактирование теста
+    editTest(test) {
+      this.$router.push({ name: 'EditTest', params: { testId: test.id } });
+    },
+
+    // Удаление теста
+    async deleteTest(testId) {
+      const { error } = await supabase.from('tests').delete().eq('id', testId);
+      if (error) {
+        console.error('Ошибка при удалении теста:', error);
+      } else {
+        console.log('Тест успешно удален');
+        this.fetchTests(); // Обновляем список тестов после удаления
+      }
+    },
+  },
+
+  // При создании компонента загружаем список тестов
+  created() {
+    this.fetchTests();
+  },
+};
+</script>
+
+<style>
+.v-container {
+  padding: 16px;
+}
+.v-btn {
+  margin-bottom: 16px;
+}
+.v-card {
+  min-height: 220px;
+}
+</style>
+
+
+
+//App
+<template>
+  <v-app>
+    <NavBar />
+    <v-main>
+      <router-view />
+    </v-main>
+  </v-app>
+</template>
+
+<script>
+import NavBar from './views/NavBar.vue';
+
+export default {
+  name: 'App',
+  components: {
+    NavBar,
+  },
+};
+</script>
